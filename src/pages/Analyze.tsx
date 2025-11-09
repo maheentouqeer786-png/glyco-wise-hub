@@ -32,7 +32,7 @@ const Analyze = () => {
       setResult(analysisResult);
       toast({
         title: "Analysis complete",
-        description: "Meal analyzed successfully",
+        description: "Meal analyzed and saved to your history",
       });
     } catch (error) {
       toast({

@@ -78,31 +78,46 @@ export const analyzeMeal = async (image: File, vitals: any): Promise<AnalyzeResu
       reader.readAsDataURL(image);
     });
 
-    const user = await authService.getCurrentUser();
-    if (!user) throw new Error('User not authenticated');
+    // Get auth token from supabase
+    const { supabase } = await import('@/lib/supabase');
+    const { data: { session } } = await supabase.auth.getSession();
 
-    const classification = await huggingFaceService.classifyFood(imageBase64);
-    const portionG = await huggingFaceService.estimatePortion(imageBase64, classification.dish);
-    const glucoseDelta = await huggingFaceService.predictGlucoseDelta(
-      classification.dish,
-      portionG,
-      parseFloat(vitals.glucose),
-      user
-    );
+    if (!session) {
+      throw new Error('User not authenticated');
+    }
 
-    const status = huggingFaceService.determineStatus(glucoseDelta, parseFloat(vitals.glucose));
-    const advice = huggingFaceService.generateAdvice(classification.dish, glucoseDelta, status, user);
+    // Call the Edge Function
+    const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+    const response = await fetch(`${supabaseUrl}/functions/v1/analyze`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({
+        imageBase64,
+        vitals,
+      }),
+    });
 
-    const tips = generateTips(status, glucoseDelta);
-    const foodSwaps = generateFoodSwaps(classification.dish);
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.error || 'Failed to analyze meal');
+    }
+
+    const result = await response.json();
+
+    // Generate tips and food swaps client-side
+    const tips = generateTips(result.status, result.predicted_glucose_delta);
+    const foodSwaps = generateFoodSwaps(result.dish);
 
     return {
-      dish: classification.dish,
-      portion: portionG,
-      predictedDelta: glucoseDelta,
-      confidence: Math.round(classification.confidence * 100),
-      advice,
-      status,
+      dish: result.dish,
+      portion: result.portion_g,
+      predictedDelta: result.predicted_glucose_delta,
+      confidence: result.confidence,
+      advice: result.advice,
+      status: result.status,
       tips,
       foodSwaps,
     };
@@ -146,13 +161,31 @@ export const saveMeal = async (mealData: any): Promise<boolean> => {
 
 export const fetchMealPlan = async (): Promise<MealPlan[]> => {
   try {
-    const user = await authService.getCurrentUser();
-    if (!user) throw new Error('User not authenticated');
+    // Get auth token from supabase
+    const { supabase } = await import('@/lib/supabase');
+    const { data: { session } } = await supabase.auth.getSession();
 
-    const mealStats = await mealsService.getMealStats(user.id, 7);
-    const vitalsSum = await vitalsService.getVitalsSummary(user.id, 7);
+    if (!session) {
+      throw new Error('User not authenticated');
+    }
 
-    return generateMealPlan(user, vitalsSum, mealStats);
+    // Call the Edge Function
+    const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+    const response = await fetch(`${supabaseUrl}/functions/v1/planner`, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${session.access_token}`,
+      },
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.error || 'Failed to fetch meal plan');
+    }
+
+    const result = await response.json();
+    return result.weekly_plan;
   } catch (error) {
     console.error('Error fetching meal plan:', error);
     return generateDefaultMealPlan();
@@ -165,34 +198,34 @@ export const regenerateMealPlan = async (): Promise<MealPlan[]> => {
 
 export const sendChatMessage = async (message: string, history: ChatMessage[]): Promise<string> => {
   try {
-    const user = await authService.getCurrentUser();
-    if (!user) throw new Error('User not authenticated');
+    // Get auth token from supabase
+    const { supabase } = await import('@/lib/supabase');
+    const { data: { session } } = await supabase.auth.getSession();
 
-    await chatService.saveChatMessage({
-      user_id: user.id,
-      role: 'user',
-      message,
+    if (!session) {
+      throw new Error('User not authenticated');
+    }
+
+    // Call the Edge Function
+    const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+    const response = await fetch(`${supabaseUrl}/functions/v1/chat`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({
+        message,
+      }),
     });
 
-    const chatHistory = await chatService.getChatHistory(user.id, 20);
-    const latestVitals = await vitalsService.getLatestVitals(user.id);
-    const mealStats = await mealsService.getMealStats(user.id, 7);
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.error || 'Failed to send chat message');
+    }
 
-    const userContext = {
-      ...user,
-      latestVitals,
-      mealStats,
-    };
-
-    const response = await chatService.sendMessageToGroq(message, chatHistory, userContext);
-
-    await chatService.saveChatMessage({
-      user_id: user.id,
-      role: 'assistant',
-      message: response,
-    });
-
-    return response;
+    const result = await response.json();
+    return result.message;
   } catch (error) {
     console.error('Error sending chat message:', error);
     return "I'm having trouble connecting right now. Please try again in a moment.";
